@@ -20,7 +20,7 @@ init(autoreset=True)
 wib = pytz.timezone('Asia/Singapore')
 
 
-def load_referral_code(default="rUcOC9"):
+def load_referral_code(default="n3h8bU"):
     try:
         with open('ref.txt', 'r', encoding='utf-8') as f:
             code = f.read().strip()
