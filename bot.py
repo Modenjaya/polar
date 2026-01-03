@@ -371,8 +371,150 @@ class Polarise:
         self.auth_tokens = {}
         self.nonce = {}
         self.sub_id = {}
-        self.faucet_tx_hashes = {}  # Store faucet tx hashes
+        self.faucet_tx_hashes = {}
+        self.captcha_key = None
+        if os.path.exists("2captcha.txt"):
+            with open("2captcha.txt", "r") as f:
+                self.captcha_key = f.read().strip()
+
+        if not self.captcha_key:
+            self.log("⚠ 2Captcha key not found – faucet captcha will not work")
+
+    async def claim_faucet_async(self, address: str, captcha_token: str):
+        url = "https://apifaucet-t.polarise.org/claim"
+        payload = {
+            "address": address.lower(),
+            "denom": "uluna",
+            "amount": "1",
+            "response": captcha_token
+        }
+        headers = {
+            "accept": "application/json, text/plain, */*",
+            "content-type": "application/json",
+            "origin": "https://faucet.polarise.org",
+            "referer": "https://faucet.polarise.org/",
+            "user-agent": FakeUserAgent().random
+        }
+
+        try:
+            async with ClientSession(timeout=ClientTimeout(total=60)) as session:
+                async with session.post(url, json=payload, headers=headers) as response:
+                    response.raise_for_status()
+                    data = await response.json()
+                    return data.get("txhash")
+        except Exception as e:
+            self.log(f"✗ Faucet claim error: {e}")
+            return None
+
+
+    async def run_faucet_only(self):
+        accounts = self.load_accounts()
+        if not accounts:
+            self.log("No accounts found")
+            return
+
+        proxy_choice, rotate_proxy = self.print_question()
+        use_proxy = proxy_choice == 1
+        if use_proxy:
+            self.load_proxies()
+
+        for account in accounts:
+            address = self.generate_address(account)
+            if not address:
+                self.log("Invalid private key")
+                continue
+
+            self.access_tokens[address] = str(uuid.uuid4())
+            self.HEADERS[address] = {
+                "Accept": "*/*",
+                "Origin": "https://app.polarise.org",
+                "Referer": "https://app.polarise.org/",
+                "User-Agent": FakeUserAgent().random
+            }
+
+            ok = await self.process_wallet_login(
+                account,
+                address,
+                use_proxy,
+                rotate_proxy
+            )
+
+            if not ok:
+                self.log("✗ Login failed")
+                continue
+
+            self.log("✓ Login success, lanjut faucet...")
+
+            self.log("Solving captcha...")
+            captcha = None
+            for _ in range(5):
+                captcha = await self.solve_faucet_captcha()
+                if captcha:
+                    break
+                await asyncio.sleep(5)
+
+            if not captcha:
+                self.log("✗ Captcha failed, skip account")
+                continue
+
     
+    async def solve_faucet_captcha(self):
+        if not hasattr(self, "captcha_key") or not self.captcha_key:
+            self.log("No 2Captcha key")
+            return None
+
+        payload = {
+            "key": self.captcha_key,
+            "method": "userrecaptcha",
+            "sitekey": "6Le97hIsAAAAAFsmmcgy66F9YbLnwgnWBILrMuqn",
+            "pageurl": "https://faucet.polarise.org",
+            "json": 1
+        }
+
+        try:
+            async with ClientSession(timeout=ClientTimeout(total=30)) as session:
+                async with session.post("https://2captcha.com/in.php", data=payload) as r:
+                    res = await r.json()
+                    if res.get("status") != 1:
+                        return None
+                    task_id = res["request"]
+
+            for _ in range(24):
+                await asyncio.sleep(5)
+                async with session.get(
+                    "https://2captcha.com/res.php",
+                    params={
+                        "key": self.captcha_key,
+                        "action": "get",
+                        "id": task_id,
+                        "json": 1
+                    }
+                ) as r:
+                    ans = await r.json()
+                    if ans.get("status") == 1:
+                        return ans.get("request")
+
+        except Exception as e:
+            self.log(f"Captcha error: {e}")
+
+        return None
+
+    async def complete_faucet_task_only(self, address: str, tx_hash: str, use_proxy: bool):
+        extra_info = json.dumps({
+            "tx_hash": tx_hash,
+            "from": address,
+            "to": address,
+            "value": "1000000"
+        })
+
+        return await self.complete_task(
+            address=address,
+            task_id=1,
+            title="Faucet",
+            use_proxy=use_proxy,
+            extra=extra_info
+        )
+
     def clear_terminal(self):
         os.system('cls' if os.name == 'nt' else 'clear')
     
@@ -441,22 +583,25 @@ class Polarise:
             return []
     
     def load_accounts_with_email(self):
-        """Load accounts from mail.txt in format email:privatekey"""
         try:
             accounts = []
             with open('mail.txt', 'r') as file:
                 for line in file:
                     line = line.strip()
-                    if line:
-                        if ':' in line:
-                            parts = line.split(':', 1)
-                            if len(parts) == 2:
-                                email, private_key = parts[0].strip(), parts[1].strip()
-                                accounts.append((email, private_key))
+                    if not line or ':' not in line:
+                        continue
+
+                    parts = line.split(':')
+                    email = parts[0].strip()
+                    private_key = parts[1].strip()   # 🔥 AMAN: abaikan sisanya
+
+                    accounts.append((email, private_key))
             return accounts
+
         except FileNotFoundError:
             self.log(f"{Fore.RED}File 'mail.txt' Not Found.{Style.RESET_ALL}")
             return []
+
        
     def load_proxies(self):
         filename = "proxy.txt"
@@ -1624,86 +1769,44 @@ Share your insights below! 🚀
             await asyncio.sleep(5)
 
     async def process_accounts_with_email(self, email: str, account: str, address: str, use_proxy: bool, rotate_proxy: bool):
-        """Process account with email binding"""
         self.log(f"{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
         self.log(f"{Fore.CYAN}Processing: {self.mask_account(address)} | Email: {email}{Style.RESET_ALL}")
-       
+
+    
         logined = await self.process_wallet_login(account, address, use_proxy, rotate_proxy)
-        if logined:
-           
-            profile = await self.profile_info(address, use_proxy)
-            if profile:
-                if profile.get("code") == "200":
-                    user_id = profile.get("data", {}).get("id")
-                    username = profile.get("data", {}).get("user_name")
-                    exchange_points = profile.get("data", {}).get("exchange_total_points")
-                    cumulative_revenue = profile.get("data", {}).get("cumulative_revenue")
-                    self.log(f"{Fore.CYAN}Points: {exchange_points}{Style.RESET_ALL}")
-                    self.log(f"{Fore.CYAN}Balance: {cumulative_revenue} GRISE{Style.RESET_ALL}")
-                    
-                    # Bind email first (task_id: 3)
-                    self.log(f"{Fore.CYAN}▶ Binding email: {email}{Style.RESET_ALL}")
-                    await self.bind_email_task(address, email, use_proxy)
-                    
-                    # Continue with other tasks...
-                    if exchange_points >= 100:
-                        used_points = (exchange_points // 100) * 100
-                        swap = await self.swap_points(account, address, user_id, username, used_points, use_proxy)
-                        if swap:
-                            if swap.get("code") == "200":
-                                self.log(f"{Fore.CYAN}Swapping points...{Style.RESET_ALL}")
-                                received_amount = swap.get("data", {}).get("received_amount")
-                                tx_hash = swap.get("data", {}).get("tx_hash")
-                               
-                                self.log(f"{Fore.GREEN}✓ Swap successful{Style.RESET_ALL}")
-                                self.log(f"{Fore.CYAN}Received: {received_amount} GRISE{Style.RESET_ALL}")
-                                self.log(f"{Fore.CYAN}Tx: {self.EXPLORER}{tx_hash}{Style.RESET_ALL}")
-                            else:
-                                err_msg = swap.get("msg", "Unknown Error")
-                                self.log(f"{Fore.RED}✗ Swap failed: {err_msg}{Style.RESET_ALL}")
-                    else:
-                        self.log(f"{Fore.YELLOW}⚠ Insufficient points for swap (need 100){Style.RESET_ALL}")
-                else:
-                    err_msg = profile.get("msg", "Unknown Error")
-                    self.log(f"{Fore.RED}✗ Fetch profile failed: {err_msg}{Style.RESET_ALL}")
-            
-            # Continue with other tasks as before...
-            task_list = await self.task_list(address, use_proxy)
-            if task_list:
-                if task_list.get("code") == "200":
-                    self.log(f"{Fore.CYAN}Fetching tasks...{Style.RESET_ALL}")
-                    tasks = task_list.get("data", {}).get("list")
-                    for task in tasks:
-                        task_id = task.get("id")
-                        title = task.get("name")
-                        reward = task.get("points")
-                        state = task.get("state")
-                        
-                        # Skip email binding task since we already did it
-                        if task_id == 3:
-                            self.log(f"{Fore.YELLOW}✓ {title}: Already completed{Style.RESET_ALL}")
-                            continue
-                        
-                        if state == 1:
-                            self.log(f"{Fore.YELLOW}✓ {title}: Already completed{Style.RESET_ALL}")
-                            continue
-                        
-                        # Process other tasks...
-                        if task_id == 1:  # Faucet task
-                            self.log(f"{Fore.CYAN}▶ {title}{Style.RESET_ALL}")
-                            # Check if we have a faucet tx hash for this account
-                            if address in self.faucet_tx_hashes:
-                                tx_hash = self.faucet_tx_hashes[address]
-                                self.log(f"{Fore.CYAN}Completing faucet task with tx: {tx_hash}{Style.RESET_ALL}")
-                                await self.complete_faucet_task(address, tx_hash, use_proxy)
-                            else:
-                                self.log(f"{Fore.YELLOW}⚠ No faucet tx hash found for this account{Style.RESET_ALL}")
-                            continue
-                        
-                        # ... (other task processing continues)
-            
-            # Add delay between accounts
-            await asyncio.sleep(5)
+        if not logined:
+            return
+
+    
+        self.log(f"{Fore.CYAN}▶ Wallet activation{Style.RESET_ALL}")
+        balance = await self.get_token_balance(address, use_proxy)
+        if balance is None:
+            self.log(f"{Fore.RED}✗ Failed to fetch POLAR balance{Style.RESET_ALL}")
+            return
+
+        need = self.CONFIG['transfer']['amount'] + self.CONFIG['transfer']['gas_fee']
+        if balance < need:
+            self.log(f"{Fore.RED}✗ Insufficient POLAR balance for activation{Style.RESET_ALL}")
+            return
+
+        extra = await self.generate_extra_info(account, address, use_proxy)
+        if not extra:
+            return
+
+        complete = await self.complete_task(address, 1, "Address activation", use_proxy, extra)
+        if not complete or complete.get("code") != "200":
+            self.log(f"{Fore.RED}✗ Wallet activation failed{Style.RESET_ALL}")
+            return
+
+        self.log(f"{Fore.GREEN}✓ Wallet activated{Style.RESET_ALL}")
+
+    
+        self.log(f"{Fore.CYAN}▶ Binding email: {email}{Style.RESET_ALL}")
+        await self.bind_email_task(address, email, use_proxy)
+
+   
+        await self.process_accounts(account, address, use_proxy, rotate_proxy)
+
     
     async def main_with_email_binding(self):
         """Main function for running with email binding from mail.txt"""
@@ -1850,6 +1953,7 @@ class PolariseRegisterBot:
             print(f"{Fore.GREEN}Loaded {len(self.proxies)} proxies from proxy.txt{Style.RESET_ALL}")
         else:
             print(f"{Fore.YELLOW}proxy.txt not found - running without proxies{Style.RESET_ALL}")
+
     
     def get_proxy_connector(self):
         if self.proxies:
@@ -1870,7 +1974,7 @@ class PolariseRegisterBot:
     
     def get_nonce(self, wallet_address):
         url = f"{self.base_url}/profile/getnonce"
-        data = {"wallet": wallet_address.lower(), "chain_name": "polarise"}
+        data = {"wallet": wallet_address, "chain_name": "polarise"}
         try:
             response = requests.post(url, headers=self.headers, json=data, timeout=30)
             if response.status_code == 200:
@@ -1886,13 +1990,13 @@ class PolariseRegisterBot:
         if not nonce:
             print(f"{Fore.RED}Failed to get nonce{Style.RESET_ALL}")
             return None, None
-        
+
         account = Account.from_key(private_key)
         message = f"Nonce to confirm: {nonce}"
         message_hash = encode_defunct(text=message)
         signed_message = account.sign_message(message_hash)
-        signature = '0x' + signed_message.signature.hex()
-        
+        signature = signed_message.signature.hex()
+
         SID = str(uuid.uuid4())
         url = f"{self.base_url}/profile/login"
         data = {
@@ -1900,23 +2004,32 @@ class PolariseRegisterBot:
             "chain_name": "polarise",
             "name": wallet_address[:6],
             "nonce": nonce,
-            "wallet": wallet_address.lower(),
+            "wallet": wallet_address,   # ⚠️ JANGAN lower()
             "sid": SID,
+            "sub_id": "",
             "inviter_code": self.inviter_code
         }
-        
+
+        response = requests.post(url, headers=self.headers, json=data, timeout=30)
+
+        if response.status_code != 200:
+            print(f"{Fore.RED}HTTP {response.status_code}{Style.RESET_ALL}")
+            print(response.text[:300])
+            return None, None
+
         try:
-            response = requests.post(url, headers=self.headers, json=data, timeout=30)
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("code") == "200":
-                    print(f"{Fore.GREEN}Login successful{Style.RESET_ALL}")
-                    return result.get("data", {}).get("auth_token_info", {}).get("auth_token"), SID
-        except Exception as e:
-            print(f"{Fore.RED}Login error: {e}{Style.RESET_ALL}")
-        
-        print(f"{Fore.RED}Login failed{Style.RESET_ALL}")
-        return None, None
+            result = response.json()
+        except Exception:
+            print(f"{Fore.RED}Non-JSON response from server:{Style.RESET_ALL}")
+            print(response.text[:300])
+            return None, None
+
+        if result.get("code") == "200":
+            print(f"{Fore.GREEN}Login successful{Style.RESET_ALL}")
+            return result["data"]["auth_token_info"]["auth_token"], SID
+        else:
+            print(f"{Fore.RED}Login failed: {result}{Style.RESET_ALL}")
+            return None, None
     
     def solve_captcha(self):
         if not self.captcha_solver:
@@ -1924,7 +2037,7 @@ class PolariseRegisterBot:
             return None
 
         print(f"{Fore.CYAN}Solving hCaptcha with 2Captcha...{Style.RESET_ALL}")
-        token = self.captcha_solver.solve_hcaptcha(
+        token = self.captcha_solver.solve_recaptcha(
             website_url="https://faucet.polarise.org",
             site_key="6Le97hIsAAAAAFsmmcgy66F9YbLnwgnWBILrMuqn"
         )
@@ -2143,42 +2256,41 @@ class TwoCaptchaSolver:
         self.api_key = api_key
         self.base_url = "https://2captcha.com"
 
-    def solve_hcaptcha(self, website_url: str, site_key: str, max_wait=120):
-        payload = {
-            "key": self.api_key,
-            "method": "hcaptcha",
-            "sitekey": site_key,
-            "pageurl": website_url,
-            "json": 1
-        }
+    def solve_recaptcha(self, website_url, site_key):
+        create = requests.post(
+            "https://2captcha.com/in.php",
+            data={
+                "key": self.api_key,
+                "method": "userrecaptcha",
+                "googlekey": site_key,
+                "pageurl": website_url,
+                "json": 1
+            },
+            timeout=30
+        ).json()
 
-        try:
-            r = requests.post(f"{self.base_url}/in.php", data=payload, timeout=30).json()
-            if r.get("status") != 1:
-                return None
+        if create.get("status") != 1:
+            return None
 
-            task_id = r.get("request")
-            for _ in range(max_wait // 5):
-                time.sleep(5)
-                res = requests.get(
-                    f"{self.base_url}/res.php",
-                    params={
-                        "key": self.api_key,
-                        "action": "get",
-                        "id": task_id,
-                        "json": 1
-                    },
-                    timeout=30
-                ).json()
+        task_id = create["request"]
 
-                if res.get("status") == 1:
-                    return res.get("request")
-                if res.get("request") != "CAPCHA_NOT_READY":
-                    break
-        except:
-            pass
+        for _ in range(24):
+            time.sleep(5)
+            res = requests.get(
+                "https://2captcha.com/res.php",
+                params={
+                    "key": self.api_key,
+                    "action": "get",
+                    "id": task_id,
+                    "json": 1
+                },
+                timeout=30
+            ).json()
+
+            if res.get("status") == 1:
+                return res["request"]
+
         return None
-
 
 class PolariseFaucetBot:
     def __init__(self):
@@ -2199,6 +2311,22 @@ class PolariseFaucetBot:
         except:
             self.capmonster_key = None
             print(f"{Fore.YELLOW}CapMonster key not found - captcha will not work{Style.RESET_ALL}")
+
+    def gen_biz_id(self, wallet_address):
+        url = f"{self.base_url}/discussion/generatebizid"
+        data = {
+            "biz_input": wallet_address.lower(),
+            "biz_type": "subscription_question",
+            "chain_name": "polarise"
+        }
+        try:
+            r = requests.post(url, headers=self.headers, json=data, timeout=30).json()
+            if r.get("code") == "200":
+                return r.get("data", {}).get("Biz_Id")
+        except:
+            pass
+        return None
+
     
     def load_accounts(self):
         """Load accounts from accounts.txt"""
@@ -2233,7 +2361,9 @@ class PolariseFaucetBot:
     
     def login(self, private_key, wallet_address):
         nonce = self.get_nonce(wallet_address)
-        if not nonce:
+        biz_id = self.gen_biz_id(wallet_address)
+
+        if not nonce or not biz_id:
             print(f"{Fore.RED}Failed to get nonce{Style.RESET_ALL}")
             return None, None
         
@@ -2252,7 +2382,8 @@ class PolariseFaucetBot:
             "nonce": nonce,
             "wallet": wallet_address.lower(),
             "sid": SID,
-            "inviter_code": "2BHlBH"
+            "sub_id": biz_id,
+            "inviter_code": "n3h8bU"
         }
         
         try:
@@ -2471,8 +2602,8 @@ if __name__ == "__main__":
             asyncio.run(bot.main())
         
         elif choice == "4":
-            bot = PolariseFaucetBot()
-            bot.claim_faucet_for_all_accounts()
+            bot = Polarise()
+            asyncio.run(bot.run_faucet_only())
         
         elif choice == "0":
             print(f"{Fore.YELLOW}Exiting{Style.RESET_ALL}")
