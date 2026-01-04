@@ -2182,7 +2182,7 @@ class PolariseRegisterBot:
         if tx_hash:
             print(f"{Fore.CYAN}  Faucet Tx: {tx_hash[:20]}...{Style.RESET_ALL}")
     
-    def register_and_faucet_with_email(self, num_accounts):
+    def register_and_faucet_with_email(self, num_accounts, do_faucet: bool):
         """Register accounts with email binding and faucet claim"""
         for i in range(num_accounts):
             print(f"\n{Fore.CYAN}[{i+1}/{num_accounts}] Creating new wallet...{Style.RESET_ALL}")
@@ -2205,38 +2205,27 @@ class PolariseRegisterBot:
                 print(f"{Fore.RED}Login failed after 10 attempts - skipping this wallet{Style.RESET_ALL}")
                 continue
             
-            # Solve captcha for faucet
-            captcha = None
-            for attempt in range(1, 5):
-                captcha = self.solve_captcha()
-                if captcha:
-                    break
-                time.sleep(10)
-            
             tx_hash = None
-            if captcha:
-                # Claim faucet FIRST
-                print(f"{Fore.CYAN}Claiming 0.1 from faucet...{Style.RESET_ALL}")
-                tx_hash = self.claim_faucet(addr, captcha)
-                
-                if tx_hash:
-                    # Complete faucet task SECOND
-                    print(f"{Fore.CYAN}Completing faucet task...{Style.RESET_ALL}")
-                    self.complete_faucet_task(addr, auth, sid, tx_hash)
-                    
-                    # Bind email THIRD (after faucet)
-                    print(f"{Fore.CYAN}Binding email...{Style.RESET_ALL}")
-                    email = self.bind_email(addr, auth, sid)
-                    
-                    if not email:
-                        print(f"{Fore.YELLOW}Email binding failed, using random email{Style.RESET_ALL}")
-                        email = generate_random_email()
+
+            if do_faucet:
+                captcha = None
+                for attempt in range(1, 5):
+                    captcha = self.solve_captcha()
+                    if captcha:
+                        break
+                    time.sleep(10)
+
+                if captcha:
+                    tx_hash = self.claim_faucet(addr, captcha)
+                    if tx_hash:
+                        self.complete_faucet_task(addr, auth, sid, tx_hash)
+                        email = self.bind_email(addr, auth, sid) or generate_random_email()
+                    else:
+                        email = self.bind_email(addr, auth, sid) or generate_random_email()
                 else:
-                    print(f"{Fore.RED}Faucet claim failed - skipping email binding{Style.RESET_ALL}")
-                    email = generate_random_email()
+                    email = self.bind_email(addr, auth, sid) or generate_random_email()
             else:
-                print(f"{Fore.RED}Captcha failed - skipping faucet and email binding{Style.RESET_ALL}")
-                email = generate_random_email()
+                email = self.bind_email(addr, auth, sid) or generate_random_email()
             
             # Save account info
             self.save_account_info(email, pk, tx_hash)
@@ -2571,44 +2560,61 @@ class PolariseFaucetBot:
 
 if __name__ == "__main__":
     while True:
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print(f"{Fore.GREEN} POLARISE BOT - Main Menu{Style.RESET_ALL}")
-        print("="*60)
+        print("=" * 60)
         print(f"{Fore.WHITE}1. Register accounts (Faucet → Task → Email){Style.RESET_ALL}")
         print(f"{Fore.WHITE}2. Daily run with email binding (from mail.txt){Style.RESET_ALL}")
         print(f"{Fore.WHITE}3. Daily run without email binding (from accounts.txt){Style.RESET_ALL}")
         print(f"{Fore.WHITE}4. Faucet claim + Task completion only (from accounts.txt){Style.RESET_ALL}")
         print(f"{Fore.WHITE}0. Exit{Style.RESET_ALL}")
-        print("="*60)
-        
-        choice = input(f"{Fore.BLUE}Select option (1/2/3/4/0): {Style.RESET_ALL}").strip()
-        
+        print("=" * 60)
+
+        choice = input(
+            f"{Fore.BLUE}Select option (1/2/3/4/0): {Style.RESET_ALL}"
+        ).strip()
+
         if choice == "1":
             bot = PolariseRegisterBot()
             try:
-                num = int(input(f"{Fore.BLUE}How many accounts to create: {Style.RESET_ALL}"))
+                num = int(input(
+                    f"{Fore.BLUE}How many accounts to create: {Style.RESET_ALL}"
+                ))
                 if num <= 0:
                     print(f"{Fore.RED}Number must be positive{Style.RESET_ALL}")
                     continue
-                bot.register_and_faucet_with_email(num)
+
+                # 🔥 TANYA CLAIM FAUCET ATAU TIDAK
+                while True:
+                    faucet_choice = input(
+                        f"{Fore.BLUE}Do you want to claim faucet? [y/n] -> {Style.RESET_ALL}"
+                    ).strip().lower()
+                    if faucet_choice in ("y", "n"):
+                        break
+                    print(f"{Fore.RED}Invalid input. Enter y or n.{Style.RESET_ALL}")
+
+                do_faucet = faucet_choice == "y"
+
+                bot.register_and_faucet_with_email(num, do_faucet)
+
             except ValueError:
                 print(f"{Fore.RED}Invalid input{Style.RESET_ALL}")
-        
+
         elif choice == "2":
             bot = Polarise()
             asyncio.run(bot.main_with_email_binding())
-        
+
         elif choice == "3":
             bot = Polarise()
             asyncio.run(bot.main())
-        
+
         elif choice == "4":
             bot = Polarise()
             asyncio.run(bot.run_faucet_only())
-        
+
         elif choice == "0":
             print(f"{Fore.YELLOW}Exiting{Style.RESET_ALL}")
             break
-        
+
         else:
             print(f"{Fore.RED}Invalid choice{Style.RESET_ALL}")
