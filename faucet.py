@@ -1,126 +1,113 @@
-import os
 import requests
 import time
+from web3 import Web3
 from eth_account import Account
-from datetime import datetime
-import pytz
-from colorama import Fore, Style, init
 
-# Init
-os.system('clear' if os.name == 'posix' else 'cls')
-init(autoreset=True)
-
+RPC_URL = "https://chainrpc.polarise.org/"
 FAUCET_URL = "https://apifaucet-t.polarise.org/claim"
-FAUCET_PAGE = "https://faucet.polarise.org"
-SITE_KEY = "6Le97hIsAAAAAFsmmcgy66F9YbLnwgnWBILrMuqn"
+SITEKEY = "6Le97hIsAAAAAFsmmcgy66F9YbLnwgnWBILrMuqn"
+PAGEURL = "https://faucet.polarise.org"
+MIN_BALANCE = 0.1
 
-# ================= LOGGER =================
-def log(msg, level="INFO"):
-    wib = pytz.timezone("Asia/Jakarta")
-    ts = datetime.now(wib).strftime("%H:%M:%S")
-    color = {
-        "INFO": Fore.CYAN,
-        "SUCCESS": Fore.GREEN,
-        "ERROR": Fore.RED,
-        "WARN": Fore.YELLOW
-    }.get(level, Fore.WHITE)
-    print(f"[{ts}] {color}[{level}] {Style.RESET_ALL}{msg}")
+w3 = Web3(Web3.HTTPProvider(RPC_URL))
 
-# ================= 2CAPTCHA =================
-class TwoCaptcha:
-    def __init__(self, api_key):
-        self.key = api_key
-        self.base = "https://2captcha.com"
+with open("2captcha.txt", "r", encoding="utf-8") as f:
+    CAPTCHA_KEY = f.read().strip()
 
-    def solve(self):
-        try:
-            create = requests.post(
-                f"{self.base}/in.php",
-                data={
-                    "key": self.key,
-                    "method": "userrecaptcha",
-                    "googlekey": SITE_KEY,
-                    "pageurl": FAUCET_PAGE,
-                    "json": 1
-                },
-                timeout=30
-            ).json()
+def solve_captcha():
+    r = requests.post("https://2captcha.com/in.php", data={
+        "key": CAPTCHA_KEY,
+        "method": "userrecaptcha",
+        "googlekey": SITEKEY,
+        "pageurl": PAGEURL,
+        "json": 1
+    }).json()
 
-            if create.get("status") != 1:
-                return None
-
-            task_id = create["request"]
-
-            for _ in range(24):
-                time.sleep(5)
-                res = requests.get(
-                    f"{self.base}/res.php",
-                    params={
-                        "key": self.key,
-                        "action": "get",
-                        "id": task_id,
-                        "json": 1
-                    },
-                    timeout=30
-                ).json()
-
-                if res.get("status") == 1:
-                    return res["request"]
-        except:
-            pass
+    if r.get("status") != 1:
         return None
 
-# ================= FAUCET =================
-def claim_faucet(address, solver):
-    log("Solving captcha...")
-    token = solver.solve()
-    if not token:
-        log("Captcha failed", "ERROR")
-        return False
+    task_id = r["request"]
 
+    for _ in range(24):
+        time.sleep(5)
+        res = requests.get("https://2captcha.com/res.php", params={
+            "key": CAPTCHA_KEY,
+            "action": "get",
+            "id": task_id,
+            "json": 1
+        }).json()
+
+        if res.get("status") == 1:
+            return res["request"]
+
+    return None
+
+def claim_faucet(address, captcha):
+    r = requests.post(
+        FAUCET_URL,
+        json={
+            "address": address.lower(),
+            "denom": "uluna",
+            "amount": "1",
+            "response": captcha
+        },
+        headers={
+            "content-type": "application/json",
+            "origin": "https://faucet.polarise.org",
+            "referer": "https://faucet.polarise.org",
+            "user-agent": "Mozilla/5.0"
+        },
+        timeout=60
+    )
+
+    if r.status_code == 200:
+        return r.json().get("txhash")
+
+    return None
+
+print("Load accounts from mail.txt")
+
+with open("mail.txt", "r", encoding="utf-8") as f:
+    private_keys = []
+    for line in f:
+        if ":" in line:
+            parts = line.strip().split(":")
+            if len(parts) >= 2:
+                private_keys.append(parts[1])
+
+print(f"Total akun: {len(private_keys)}\n")
+
+for pk in private_keys:
     try:
-        res = requests.post(
-            FAUCET_URL,
-            json={
-                "address": address,
-                "denom": "uluna",
-                "response": token
-            },
-            timeout=30
-        ).json()
+        account = Account.from_key(pk)
+        address = account.address
 
-        if res.get("code") == 200:
-            log(f"Faucet success → {res.get('amount')} POLAR", "SUCCESS")
-            return True
+        balance = w3.from_wei(w3.eth.get_balance(address), "ether")
+
+        print(f"Address : {address}")
+        print(f"Balance : {balance} POLAR")
+
+        if balance >= MIN_BALANCE:
+            print("Balance cukup, skip\n")
+            continue
+
+        print("Balance kurang, solve captcha...")
+        captcha = solve_captcha()
+
+        if not captcha:
+            print("Captcha gagal\n")
+            continue
+
+        tx = claim_faucet(address, captcha)
+
+        if tx:
+            print(f"Faucet sukses | Tx: {tx}\n")
         else:
-            log(f"Faucet failed: {res}", "ERROR")
+            print("Faucet gagal\n")
+
+        time.sleep(10)
+
     except Exception as e:
-        log(str(e), "ERROR")
-    return False
+        print("Error:", e, "\n")
 
-# ================= MAIN =================
-def main():
-    if not os.path.exists("accounts.txt"):
-        log("accounts.txt not found", "ERROR")
-        return
-
-    if not os.path.exists("2captcha.txt"):
-        log("2captcha.txt not found", "ERROR")
-        return
-
-    with open("2captcha.txt") as f:
-        captcha_key = f.read().strip()
-
-    solver = TwoCaptcha(captcha_key)
-
-    with open("accounts.txt") as f:
-        keys = [x.strip() for x in f if x.strip()]
-
-    for i, pk in enumerate(keys, 1):
-        print(f"\n{Fore.YELLOW}=== Account {i}/{len(keys)} ==={Style.RESET_ALL}")
-        acc = Account.from_key(pk)
-        claim_faucet(acc.address, solver)
-        time.sleep(3)
-
-if __name__ == "__main__":
-    main()
+print("Selesai")
