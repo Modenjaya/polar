@@ -1944,7 +1944,7 @@ class PolariseRegisterBot:
             print(f"{Fore.YELLOW}2Captcha key not found - captcha will not work{Style.RESET_ALL}")
 
         
-        self.inviter_code = load_referral_code(default="rUcOC9")
+        self.inviter_code = load_referral_code(default="n3h8bU")
 
         self.proxies = []
         if os.path.exists("proxy.txt"):
