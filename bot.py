@@ -2243,8 +2243,9 @@ class PolariseRegisterBot:
             
             # Delay between accounts
             if i < num_accounts - 1:
+                delay = random.randint(20, 30)
                 print(f"{Fore.YELLOW}Waiting 3 seconds before next account...{Style.RESET_ALL}")
-                time.sleep(3)
+                time.sleep(delay)
         
         print(f"\n{Fore.GREEN}Registration completed!{Style.RESET_ALL}")
         print(f"{Fore.CYAN}Accounts saved to:{Style.RESET_ALL}")
