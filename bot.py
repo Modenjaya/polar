@@ -379,6 +379,14 @@ class Polarise:
 
         if not self.captcha_key:
             self.log("⚠ 2Captcha key not found – faucet captcha will not work")
+        self.captcha_solver = None
+
+        if self.captcha_key:
+            self.captcha_solver = TwoCaptchaSolver(self.captcha_key)
+        else:
+            self.log("⚠ 2Captcha key not found – faucet captcha will not work")
+
+
 
     async def claim_faucet_async(self, address: str, captcha_token: str):
         url = "https://apifaucet-t.polarise.org/claim"
@@ -456,48 +464,44 @@ class Polarise:
             if not captcha:
                 self.log("✗ Captcha failed, skip account")
                 continue
+            
+            self.log("✓ Captcha solved, claiming faucet...")
+
+            tx_hash = await self.claim_faucet_async(address, captcha)
+
+            if not tx_hash:
+                self.log("✗ Faucet claim failed")
+                continue
+
+            self.log(f"✓ Faucet claimed: {tx_hash}")
+
+            done = await self.complete_faucet_task_only(address, tx_hash, use_proxy)
+            if not done:
+                self.log("✗ Faucet task completion failed")
+                continue
+
+            self.log("✓ Faucet task completed")
+            await asyncio.sleep(10)
 
     
     async def solve_faucet_captcha(self):
-        if not hasattr(self, "captcha_key") or not self.captcha_key:
-            self.log("No 2Captcha key")
-            return None
-
-        payload = {
-            "key": self.captcha_key,
-            "method": "userrecaptcha",
-            "sitekey": "6Le97hIsAAAAAFsmmcgy66F9YbLnwgnWBILrMuqn",
-            "pageurl": "https://faucet.polarise.org",
-            "json": 1
-        }
-
-        try:
-            async with ClientSession(timeout=ClientTimeout(total=30)) as session:
-                async with session.post("https://2captcha.com/in.php", data=payload) as r:
-                    res = await r.json()
-                    if res.get("status") != 1:
-                        return None
-                    task_id = res["request"]
-
-            for _ in range(24):
-                await asyncio.sleep(5)
-                async with session.get(
-                    "https://2captcha.com/res.php",
-                    params={
-                        "key": self.captcha_key,
-                        "action": "get",
-                        "id": task_id,
-                        "json": 1
-                    }
-                ) as r:
-                    ans = await r.json()
-                    if ans.get("status") == 1:
-                        return ans.get("request")
-
-        except Exception as e:
-            self.log(f"Captcha error: {e}")
-
+      if not self.captcha_solver:
+        self.log("No 2Captcha key")
         return None
+
+      self.log("Solving captcha via 2Captcha (sync)...")
+
+      try:
+        token = await asyncio.to_thread(
+            self.captcha_solver.solve_recaptcha,
+            "https://faucet.polarise.org",
+            "6Le97hIsAAAAAFsmmcgy66F9YbLnwgnWBILrMuqn"
+        )
+        return token
+      except Exception as e:
+        self.log(f"Captcha error: {e}")
+        return None
+
 
     async def complete_faucet_task_only(self, address: str, tx_hash: str, use_proxy: bool):
         extra_info = json.dumps({
